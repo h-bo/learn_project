@@ -21,7 +21,7 @@
 
 ```bash
 # 创建虚拟环境
-python -m venv t5qa_env
+conda create --prefix /home/featurize/work/t5qa_env python=3.11
 
 # 激活虚拟环境
 ## Windows
@@ -40,6 +40,17 @@ deactivate
 pip install -r requirements.txt
 ```
 
+### 3. 配置 Weights & Biases
+
+```bash
+# 登录到 Weights & Biases
+wandb login
+
+# 设置环境变量（可选）
+export WANDB_PROJECT="t5-qa"  # 项目名称
+export WANDB_ENTITY="your-username"  # 你的用户名或组织名
+```
+
 ## 使用方法
 
 ### 1. 训练模型
@@ -49,16 +60,18 @@ pip install -r requirements.txt
 python train.py \
     --train_path data/train.json \
     --dev_path data/dev.json \
-    --model_name langboat/mengzi-t5-base \
+    --model_id langboat/mengzi-t5-base \
     --output_dir qa_model \
     --num_epochs 5 \
     --batch_size 8 \
-    --learning_rate 5e-5
+    --learning_rate 5e-5 \
+    --wandb_project t5-qa \
+    --wandb_name "baseline-run"
 ```
 
 快速测试模式：
 ```bash
-python train.py --fast_test
+python train.py --fast_test --wandb_name "fast-test-run"
 ```
 
 从检查点继续训练：
@@ -69,17 +82,20 @@ python train.py --resume_from qa_model/checkpoint-1000
 主要参数说明：
 - `--train_path`: 训练数据路径
 - `--dev_path`: 验证数据路径
-- `--model_name`: 预训练模型名称
+- `--model_id`: ModelScope 模型ID
 - `--output_dir`: 模型保存路径
 - `--resume_from`: 从某个检查点继续训练
 - `--save_steps`: 每多少步保存一次检查点
 - `--num_epochs`: 训练轮数
 - `--batch_size`: 批次大小
 - `--learning_rate`: 学习率
-- `--warmup_steps`: warmup步数
 - `--max_length`: 最大序列长度
 - `--max_samples`: 每个数据集最大样本数（用于快速测试）
 - `--fast_test`: 快速测试模式
+# Weights & Biases 相关参数
+- `--wandb_project`: W&B项目名称
+- `--wandb_name`: 本次运行的名称
+- `--wandb_entity`: W&B用户名或组织名
 
 ### 2. 测试模型
 
@@ -126,7 +142,17 @@ python test.py \
    - 训练状态（包括优化器状态、学习率调度器状态等）
    - 训练历史（损失和评估指标）
 
-4. 训练过程会生成训练曲线图（`training_curves.png`），展示：
+4. 训练监控：
+   - 通过 Weights & Biases 实时监控训练过程
+   - 记录的指标包括：
+     - 训练损失
+     - 评估损失
+     - BLEU 分数
+     - 学习率变化
+     - 训练速度
+   - 可以在 W&B 界面上查看训练曲线和指标变化
+
+5. 训练过程会生成训练曲线图（`training_curves.png`），展示：
    - 训练损失变化
    - BLEU 分数变化
 

@@ -21,7 +21,7 @@ wheels/
 *.egg
 
 # Virtual Environment
-venv/
+t5qa_env/
 ENV/
 env/
 

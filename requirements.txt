@@ -1,8 +1,16 @@
-torch>=1.8.0
-transformers>=4.5.0
-datasets>=1.6.0
-nltk>=3.6.0
-numpy>=1.19.0
-tqdm>=4.61.0
-matplotlib>=3.4.0
-sentencepiece>=0.1.99
+# 基础依赖
+torch>=2.0.0
+modelscope>=1.9.5
+datasets>=2.12.0
+nltk>=3.8.1
+numpy>=1.24.3
+tqdm>=4.65.0
+matplotlib>=3.7.1
+wandb>=0.15.0
+
+# ModelScope 相关依赖
+addict>=2.4.0
+pyyaml>=6.0.1
+yapf>=0.40.1
+protobuf>=3.20.0
+scipy>=1.10.0

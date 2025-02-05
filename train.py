@@ -2,10 +2,21 @@ import os
 import torch
 import logging
 import argparse
+import wandb
 from tqdm import tqdm
 import matplotlib.pyplot as plt
-from transformers import T5ForConditionalGeneration, T5Tokenizer
-from transformers import AdamW, get_linear_schedule_with_warmup
+from modelscope.models import Model
+from modelscope.preprocessors import TextGenerationT5Preprocessor
+from modelscope.trainers.nlp.text_generation_trainer import TextGenerationTrainer
+from modelscope.utils.constant import Tasks
+from modelscope.pipelines import pipeline
+from modelscope.utils.config import Config
+from modelscope.metrics.base import Metric
+from modelscope.metrics.builder import METRICS
+from modelscope.utils.registry import default_group
+from modelscope.metrics import METRICS
+from modelscope.msdatasets import MsDataset
+from modelscope.utils.hub import snapshot_download
 from dataset import create_dataloaders
 from metrics import MetricsCalculator
 
@@ -24,14 +35,22 @@ def parse_args():
                         help='每个数据集最大样本数，用于快速测试')
     
     # 模型相关参数
-    parser.add_argument('--model_name', type=str, default='langboat/mengzi-t5-base',
-                        help='预训练模型名称')
+    parser.add_argument('--model_id', type=str, default='langboat/mengzi-t5-base',
+                        help='ModelScope模型ID')
     parser.add_argument('--output_dir', type=str, default='qa_model',
                         help='模型保存路径')
     parser.add_argument('--resume_from', type=str, default=None,
                         help='从某个检查点继续训练')
     parser.add_argument('--save_steps', type=int, default=100,
                         help='每多少步保存一次检查点')
+    
+    # wandb相关参数
+    parser.add_argument('--wandb_project', type=str, default='t5-qa',
+                        help='Weights & Biases项目名称')
+    parser.add_argument('--wandb_name', type=str, default=None,
+                        help='Weights & Biases运行名称')
+    parser.add_argument('--wandb_entity', type=str, default=None,
+                        help='Weights & Biases实体名称')
     
     # 训练相关参数
     parser.add_argument('--num_epochs', type=int, default=5,
@@ -58,19 +77,22 @@ def parse_args():
         args.max_samples = 10
         args.learning_rate = 5e-4
         args.warmup_steps = 10
+        args.save_steps = 5
     
     return args
 
-def train(model, train_loader, dev_loader, tokenizer, device, 
+def train(model, train_loader, dev_loader, preprocessor, device, 
           num_epochs=5, learning_rate=5e-5, warmup_steps=0,
           output_dir='qa_model', save_steps=100, start_epoch=0):
     
-    optimizer = AdamW(model.parameters(), lr=learning_rate)
+    # 创建优化器和学习率调度器
+    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
     total_steps = len(train_loader) * num_epochs
-    scheduler = get_linear_schedule_with_warmup(
-        optimizer, 
-        num_warmup_steps=warmup_steps,
-        num_training_steps=total_steps
+    scheduler = torch.optim.lr_scheduler.LinearLR(
+        optimizer,
+        start_factor=1.0,
+        end_factor=0.0,
+        total_iters=total_steps,
     )
     
     train_losses = []
@@ -83,19 +105,17 @@ def train(model, train_loader, dev_loader, tokenizer, device,
         progress_bar = tqdm(train_loader, desc=f'Epoch {epoch+1}/{num_epochs}')
         
         for batch_idx, batch in enumerate(progress_bar):
-            input_ids = batch['input_ids'].to(device)
-            attention_mask = batch['attention_mask'].to(device)
-            labels = batch['labels'].to(device)
+            # 预处理数据
+            inputs = preprocessor(batch)
+            inputs = {k: v.to(device) if isinstance(v, torch.Tensor) else v 
+                     for k, v in inputs.items()}
             
-            outputs = model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                labels=labels
-            )
-            
-            loss = outputs.loss
+            # 前向传播
+            outputs = model(**inputs)
+            loss = outputs['loss']
             total_loss += loss.item()
             
+            # 反向传播
             loss.backward()
             optimizer.step()
             scheduler.step()
@@ -103,13 +123,20 @@ def train(model, train_loader, dev_loader, tokenizer, device,
             
             progress_bar.set_postfix({'loss': loss.item()})
             
+            # 记录到wandb
+            wandb.log({
+                'train/loss': loss.item(),
+                'train/learning_rate': scheduler.get_last_lr()[0],
+                'train/epoch': epoch + batch_idx / len(train_loader),
+                'train/global_step': global_step,
+            })
+            
             global_step += 1
             # 保存检查点
             if global_step % save_steps == 0:
                 checkpoint_dir = os.path.join(output_dir, f'checkpoint-{global_step}')
                 os.makedirs(checkpoint_dir, exist_ok=True)
                 model.save_pretrained(checkpoint_dir)
-                tokenizer.save_pretrained(checkpoint_dir)
                 # 保存优化器和调度器状态
                 torch.save({
                     'epoch': epoch,
@@ -125,19 +152,25 @@ def train(model, train_loader, dev_loader, tokenizer, device,
         train_losses.append(avg_train_loss)
         
         # Evaluation
-        metrics = evaluate(model, dev_loader, tokenizer, device)
+        metrics = evaluate(model, dev_loader, preprocessor, device)
         dev_metrics_history.append(metrics)
         
         logger.info(f'Epoch {epoch+1}:')
         logger.info(f'Average training loss: {avg_train_loss:.4f}')
         for metric_name, value in metrics.items():
             logger.info(f'{metric_name}: {value:.4f}')
+            
+        # 记录评估指标到wandb
+        wandb.log({
+            'eval/loss': avg_train_loss,
+            'eval/epoch': epoch + 1,
+            **{f'eval/{k}': v for k, v in metrics.items()}
+        })
         
         # 保存每个epoch结束后的模型
         epoch_dir = os.path.join(output_dir, f'epoch-{epoch+1}')
         os.makedirs(epoch_dir, exist_ok=True)
         model.save_pretrained(epoch_dir)
-        tokenizer.save_pretrained(epoch_dir)
         torch.save({
             'epoch': epoch + 1,
             'global_step': global_step,
@@ -153,78 +186,55 @@ def train(model, train_loader, dev_loader, tokenizer, device,
     
     return train_losses, dev_metrics_history
 
-def evaluate(model, dev_loader, tokenizer, device):
+def evaluate(model, dev_loader, preprocessor, device):
     model.eval()
     metrics_calculator = MetricsCalculator()
     
     with torch.no_grad():
         for batch in tqdm(dev_loader, desc='Evaluating'):
-            input_ids = batch['input_ids'].to(device)
-            attention_mask = batch['attention_mask'].to(device)
-            labels = batch['labels']
+            # 预处理数据
+            inputs = preprocessor(batch)
+            inputs = {k: v.to(device) if isinstance(v, torch.Tensor) else v 
+                     for k, v in inputs.items()}
             
-            generated_ids = model.generate(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                max_length=64,
-                num_beams=4,
-                early_stopping=True
-            )
-            
-            # Decode predictions and references
-            predictions = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
-            references = tokenizer.batch_decode(labels, skip_special_tokens=True)
+            # 生成答案
+            outputs = model.generate(**inputs)
+            predictions = preprocessor.decode(outputs)
+            references = batch['answer']
             
             metrics_calculator.update(references, predictions)
     
     return metrics_calculator.get_metrics()
 
-def plot_training_curve(train_losses, dev_metrics_history):
-    plt.figure(figsize=(12, 6))
-    
-    # Plot training loss
-    plt.subplot(1, 2, 1)
-    plt.plot(train_losses, label='Training Loss')
-    plt.xlabel('Epoch')
-    plt.ylabel('Loss')
-    plt.title('Training Loss Curve')
-    plt.legend()
-    
-    # Plot BLEU scores
-    plt.subplot(1, 2, 2)
-    for i in range(4):
-        bleu_scores = [metrics[f'bleu-{i+1}'] for metrics in dev_metrics_history]
-        plt.plot(bleu_scores, label=f'BLEU-{i+1}')
-    
-    plt.xlabel('Epoch')
-    plt.ylabel('Score')
-    plt.title('BLEU Scores')
-    plt.legend()
-    
-    plt.tight_layout()
-    plt.savefig('training_curves.png')
-    plt.close()
-
 def main():
     # 解析命令行参数
     args = parse_args()
+    
+    # 初始化wandb
+    wandb.init(
+        project=args.wandb_project,
+        name=args.wandb_name,
+        entity=args.wandb_entity,
+        config=vars(args)
+    )
     
     # Set device
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     logger.info(f'Using device: {device}')
     
-    # Load tokenizer and model
+    # 创建预处理器
+    preprocessor = TextGenerationT5Preprocessor(model_dir=args.model_id)
+    
+    # Load model
     if args.resume_from:
         logger.info(f'Loading model from checkpoint: {args.resume_from}')
-        tokenizer = T5Tokenizer.from_pretrained(args.resume_from)
-        model = T5ForConditionalGeneration.from_pretrained(args.resume_from)
+        model = Model.from_pretrained(args.resume_from, task=Tasks.text_generation)
         # 加载训练状态
         training_state = torch.load(os.path.join(args.resume_from, 'training_state.pt'))
         start_epoch = training_state['epoch']
         logger.info(f'Resuming from epoch {start_epoch}')
     else:
-        tokenizer = T5Tokenizer.from_pretrained(args.model_name)
-        model = T5ForConditionalGeneration.from_pretrained(args.model_name)
+        model = Model.from_pretrained(args.model_id, task=Tasks.text_generation)
         start_epoch = 0
     
     model.to(device)
@@ -233,7 +243,7 @@ def main():
     train_loader, dev_loader = create_dataloaders(
         args.train_path, 
         args.dev_path, 
-        tokenizer,
+        preprocessor,
         batch_size=args.batch_size,
         max_length=args.max_length,
         max_samples=args.max_samples
@@ -244,7 +254,7 @@ def main():
         model=model,
         train_loader=train_loader,
         dev_loader=dev_loader,
-        tokenizer=tokenizer,
+        preprocessor=preprocessor,
         device=device,
         num_epochs=args.num_epochs,
         learning_rate=args.learning_rate,
@@ -257,8 +267,10 @@ def main():
     # Save the final model
     os.makedirs(args.output_dir, exist_ok=True)
     model.save_pretrained(args.output_dir)
-    tokenizer.save_pretrained(args.output_dir)
     logger.info(f"Model saved to {args.output_dir}")
+    
+    # 结束wandb运行
+    wandb.finish()
 
 if __name__ == "__main__":
     main()
