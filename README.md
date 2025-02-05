@@ -11,11 +11,31 @@
 ├── train.py           # 训练脚本
 ├── test.py            # 测试脚本
 ├── dataset.py         # 数据集处理
-└── metrics.py         # 评估指标计算
+├── metrics.py         # 评估指标计算
+└── data/             # 数据目录
 ```
 
-## 安装依赖
+## 环境配置
 
+### 1. 创建虚拟环境
+
+```bash
+# 创建虚拟环境
+python -m venv t5qa_env
+
+# 激活虚拟环境
+## Windows
+t5qa_env\Scripts\activate
+## macOS/Linux
+source t5qa_env/bin/activate
+
+# 退出虚拟环境
+deactivate
+```
+
+### 2. 安装依赖
+
+激活虚拟环境后安装依赖：
 ```bash
 pip install -r requirements.txt
 ```
@@ -125,3 +145,5 @@ python test.py \
 2. 如果训练中断，可以使用 `--resume_from` 参数从最近的检查点继续训练。
 
 3. 模型和数据都比较大，请确保有足够的磁盘空间和内存。
+
+4. 请确保在激活的虚拟环境中运行所有命令。
