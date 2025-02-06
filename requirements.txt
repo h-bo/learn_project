@@ -15,5 +15,5 @@ sentencepiece  # T5分词器依赖
 addict>=2.4.0
 pyyaml>=6.0.1
 yapf>=0.40.1
-protobuf>=4.25.1
+protobuf==3.20.3  # 固定版本以解决兼容性问题
 scipy>=1.11.4
