@@ -24,6 +24,10 @@ def parse_args():
                         help='最大序列长度')
     parser.add_argument('--max_samples', type=int, default=None,
                         help='测试样本数量')
+    parser.add_argument('--num_workers', type=int, default=4,
+                        help='数据加载的工作进程数')
+    parser.add_argument('--pin_memory', action='store_true',
+                        help='是否将数据固定在内存中，在GPU训练时建议开启')
     
     return parser.parse_args()
 
@@ -88,7 +92,9 @@ def main():
         tokenizer,  # 使用同一个tokenizer作为eval_tokenizer
         batch_size=args.batch_size,
         max_length=args.max_length,
-        max_samples=args.max_samples
+        max_samples=args.max_samples,
+        num_workers=args.num_workers,
+        pin_memory=args.pin_memory
     )
     
     # Test the model

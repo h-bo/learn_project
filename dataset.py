@@ -71,39 +71,56 @@ class QADataset(Dataset):
             print(f"Error: {str(e)}")
             raise
 
-def create_dataloaders(train_path, dev_path, train_tokenizer, eval_tokenizer, 
-                      batch_size=8, max_length=512, max_samples=None):
+def create_dataloaders(
+    train_path: str,
+    dev_path: str,
+    tokenizer,
+    eval_tokenizer=None,
+    batch_size: int = 8,
+    max_length: int = 512,
+    max_samples: int = None,
+    num_workers: int = 4,
+    pin_memory: bool = True
+):
     """
-    创建训练和验证数据的DataLoader
-    
+    创建训练和验证数据加载器。
+
     Args:
         train_path: 训练数据路径
         dev_path: 验证数据路径
-        train_tokenizer: 用于训练数据的tokenizer
-        eval_tokenizer: 用于验证数据的tokenizer
+        tokenizer: 训练数据的tokenizer
+        eval_tokenizer: 验证数据的tokenizer，如果为None则使用tokenizer
         batch_size: 批次大小
         max_length: 最大序列长度
-        max_samples: 每个数据集的最大样本数，用于快速测试
-        
+        max_samples: 每个数据集最大样本数，用于快速测试
+        num_workers: DataLoader的工作进程数，默认为4
+        pin_memory: 是否将数据固定在内存中，在GPU训练时设为True可提升性能
+
     Returns:
-        train_loader: 训练数据的DataLoader
-        dev_loader: 验证数据的DataLoader
+        tuple: (train_loader, dev_loader)
     """
-    train_dataset = QADataset(train_path, train_tokenizer, max_length, max_samples)
+    if eval_tokenizer is None:
+        eval_tokenizer = tokenizer
+
+    # 创建数据集
+    train_dataset = QADataset(train_path, tokenizer, max_length, max_samples)
     dev_dataset = QADataset(dev_path, eval_tokenizer, max_length, max_samples)
-    
+
+    # 创建数据加载器
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
-        num_workers=0
+        num_workers=num_workers,
+        pin_memory=pin_memory
     )
     
     dev_loader = DataLoader(
         dev_dataset,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=0
+        num_workers=num_workers,
+        pin_memory=pin_memory
     )
-    
+
     return train_loader, dev_loader
