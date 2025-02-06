@@ -37,7 +37,7 @@ def parse_args():
                         help='模型保存路径')
     parser.add_argument('--resume_from', type=str, default=None,
                         help='从某个检查点继续训练')
-    parser.add_argument('--save_steps', type=int, default=100,
+    parser.add_argument('--save_steps', type=int, default=1000,
                         help='每多少步保存一次检查点')
     
     # wandb相关参数
@@ -51,7 +51,7 @@ def parse_args():
     # 训练相关参数
     parser.add_argument('--num_epochs', type=int, default=5,
                         help='训练轮数')
-    parser.add_argument('--batch_size', type=int, default=8,
+    parser.add_argument('--batch_size', type=int, default=4,
                         help='批次大小')
     parser.add_argument('--learning_rate', type=float, default=5e-5,
                         help='学习率')
@@ -70,7 +70,7 @@ def parse_args():
     if args.fast_test:
         args.num_epochs = 2
         args.batch_size = 4
-        args.max_samples = 10
+        args.max_samples = 100
         args.learning_rate = 5e-4
         args.warmup_steps = 10
         args.save_steps = 5
