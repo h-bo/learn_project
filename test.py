@@ -1,9 +1,9 @@
 import argparse
 import torch
 import logging
-from transformers import T5ForConditionalGeneration, T5Tokenizer
 from dataset import create_dataloaders
 from metrics import MetricsCalculator
+from model_utils import load_model_and_tokenizer
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -13,6 +13,9 @@ def parse_args():
     
     parser.add_argument('--model_path', type=str, required=True,
                         help='模型路径，可以是检查点目录')
+    parser.add_argument('--model_source', type=str, default='huggingface',
+                        choices=['huggingface', 'modelscope'],
+                        help='模型来源')
     parser.add_argument('--test_path', type=str, default='data/DuReaderQG/dev.json',
                         help='测试数据路径')
     parser.add_argument('--batch_size', type=int, default=8,
@@ -74,8 +77,7 @@ def main():
     
     # Load model and tokenizer
     logger.info(f'Loading model from {args.model_path}')
-    tokenizer = T5Tokenizer.from_pretrained(args.model_path)
-    model = T5ForConditionalGeneration.from_pretrained(args.model_path)
+    model, tokenizer = load_model_and_tokenizer(args.model_path, args.model_source == 'modelscope')
     model.to(device)
     
     # Create test dataloader

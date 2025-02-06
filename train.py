@@ -5,9 +5,9 @@ import argparse
 import wandb
 from tqdm import tqdm
 import matplotlib.pyplot as plt
-from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 from dataset import create_dataloaders
 from metrics import MetricsCalculator
+from model_utils import download_model, load_model_and_tokenizer
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -25,9 +25,14 @@ def parse_args():
     
     # 模型相关参数
     parser.add_argument('--model_id', type=str, default='langboat/mengzi-t5-base',
-                        help='Hugging Face模型ID')
-    parser.add_argument('--model_dir', type=str, default='pretrained_models',
-                        help='预训练模型本地保存目录')
+                        help='模型ID，支持Hugging Face和ModelScope的模型')
+    parser.add_argument('--model_source', type=str, default='huggingface',
+                        choices=['huggingface', 'modelscope'],
+                        help='模型来源')
+    parser.add_argument('--model_revision', type=str, default=None,
+                        help='模型版本')
+    parser.add_argument('--cache_dir', type=str, default='pretrained_models',
+                        help='预训练模型缓存目录')
     parser.add_argument('--output_dir', type=str, default='qa_model',
                         help='模型保存路径')
     parser.add_argument('--resume_from', type=str, default=None,
@@ -182,9 +187,21 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     logger.info(f'Using device: {device}')
     
-    # 加载tokenizer和model
-    tokenizer = AutoTokenizer.from_pretrained(args.model_id)
-    model = AutoModelForSeq2SeqLM.from_pretrained(args.model_id)
+    # 下载并加载模型和tokenizer
+    if args.resume_from:
+        logger.info(f'Loading model from checkpoint: {args.resume_from}')
+        model_path = args.resume_from
+        is_modelscope = args.model_source == 'modelscope'
+    else:
+        logger.info(f'Downloading model from {args.model_source}: {args.model_id}')
+        model_path, is_modelscope = download_model(
+            args.model_id,
+            args.model_revision,
+            args.cache_dir,
+            args.model_source
+        )
+    
+    model, tokenizer = load_model_and_tokenizer(model_path, is_modelscope)
     model = model.to(device)
     
     # 创建数据加载器
