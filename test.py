@@ -43,9 +43,13 @@ def test(model, test_loader, tokenizer, device):
                 early_stopping=True
             )
             
-            # Decode predictions and references
+            # Decode predictions
             predictions = tokenizer.batch_decode(generated_ids, skip_special_tokens=True)
-            references = tokenizer.batch_decode(labels, skip_special_tokens=True)
+            
+            # Replace -100 in labels with pad_token_id for proper decoding
+            labels_for_decode = labels.clone()
+            labels_for_decode[labels_for_decode == -100] = tokenizer.pad_token_id
+            references = tokenizer.batch_decode(labels_for_decode, skip_special_tokens=True)
             
             # Print some examples
             for pred, ref in zip(predictions[:2], references[:2]):
@@ -79,6 +83,7 @@ def main():
         args.test_path,
         args.test_path,  # dev_path 参数不会被使用
         tokenizer,
+        tokenizer,  # 使用同一个tokenizer作为eval_tokenizer
         batch_size=args.batch_size,
         max_length=args.max_length,
         max_samples=args.max_samples
