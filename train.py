@@ -5,18 +5,7 @@ import argparse
 import wandb
 from tqdm import tqdm
 import matplotlib.pyplot as plt
-from modelscope.models import Model
-from modelscope.preprocessors import TextGenerationT5Preprocessor
-from modelscope.trainers.nlp.text_generation_trainer import TextGenerationTrainer
-from modelscope.utils.constant import Tasks
-from modelscope.pipelines import pipeline
-from modelscope.utils.config import Config
-from modelscope.metrics.base import Metric
-from modelscope.metrics.builder import METRICS
-from modelscope.utils.registry import default_group
-from modelscope.metrics import METRICS
-from modelscope.msdatasets import MsDataset
-from modelscope.utils.hub import snapshot_download
+from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 from dataset import create_dataloaders
 from metrics import MetricsCalculator
 
@@ -36,7 +25,9 @@ def parse_args():
     
     # 模型相关参数
     parser.add_argument('--model_id', type=str, default='langboat/mengzi-t5-base',
-                        help='ModelScope模型ID')
+                        help='Hugging Face模型ID')
+    parser.add_argument('--model_dir', type=str, default='pretrained_models',
+                        help='预训练模型本地保存目录')
     parser.add_argument('--output_dir', type=str, default='qa_model',
                         help='模型保存路径')
     parser.add_argument('--resume_from', type=str, default=None,
@@ -81,180 +72,152 @@ def parse_args():
     
     return args
 
-def train(model, train_loader, dev_loader, preprocessor, device, 
+def train(model, train_loader, dev_loader, tokenizer, device, 
           num_epochs=5, learning_rate=5e-5, warmup_steps=0,
           output_dir='qa_model', save_steps=100, start_epoch=0):
     
-    # 创建优化器和学习率调度器
+    model.train()
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
-    total_steps = len(train_loader) * num_epochs
-    scheduler = torch.optim.lr_scheduler.LinearLR(
-        optimizer,
-        start_factor=1.0,
-        end_factor=0.0,
-        total_iters=total_steps,
-    )
     
-    train_losses = []
-    dev_metrics_history = []
-    global_step = start_epoch * len(train_loader)
+    # 设置进度条
+    total_steps = len(train_loader) * num_epochs
+    progress_bar = tqdm(total=total_steps, desc="Training")
+    
+    global_step = 0
+    best_eval_loss = float('inf')
     
     for epoch in range(start_epoch, num_epochs):
-        model.train()
-        total_loss = 0
-        progress_bar = tqdm(train_loader, desc=f'Epoch {epoch+1}/{num_epochs}')
-        
-        for batch_idx, batch in enumerate(progress_bar):
-            # 预处理数据
-            inputs = preprocessor(batch)
-            inputs = {k: v.to(device) if isinstance(v, torch.Tensor) else v 
-                     for k, v in inputs.items()}
+        epoch_loss = 0
+        for batch in train_loader:
+            input_ids = batch['input_ids'].to(device)
+            attention_mask = batch['attention_mask'].to(device)
+            labels = batch['labels'].to(device)
             
-            # 前向传播
-            outputs = model(**inputs)
-            loss = outputs['loss']
-            total_loss += loss.item()
+            outputs = model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                labels=labels
+            )
             
-            # 反向传播
+            loss = outputs.loss
             loss.backward()
             optimizer.step()
-            scheduler.step()
             optimizer.zero_grad()
             
-            progress_bar.set_postfix({'loss': loss.item()})
+            epoch_loss += loss.item()
+            global_step += 1
+            progress_bar.update(1)
             
             # 记录到wandb
             wandb.log({
-                'train/loss': loss.item(),
-                'train/learning_rate': scheduler.get_last_lr()[0],
-                'train/epoch': epoch + batch_idx / len(train_loader),
-                'train/global_step': global_step,
+                'train_loss': loss.item(),
+                'epoch': epoch,
+                'global_step': global_step
             })
             
-            global_step += 1
-            # 保存检查点
+            # 定期保存和评估
             if global_step % save_steps == 0:
-                checkpoint_dir = os.path.join(output_dir, f'checkpoint-{global_step}')
-                os.makedirs(checkpoint_dir, exist_ok=True)
-                model.save_pretrained(checkpoint_dir)
-                # 保存优化器和调度器状态
-                torch.save({
+                # 保存模型
+                save_path = os.path.join(output_dir, f'checkpoint-{global_step}')
+                os.makedirs(save_path, exist_ok=True)
+                model.save_pretrained(save_path)
+                tokenizer.save_pretrained(save_path)
+                
+                # 评估
+                eval_loss = evaluate(model, dev_loader, tokenizer, device)
+                model.train()  # 切回训练模式
+                
+                wandb.log({
+                    'eval_loss': eval_loss,
                     'epoch': epoch,
-                    'global_step': global_step,
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'scheduler_state_dict': scheduler.state_dict(),
-                    'train_losses': train_losses,
-                    'dev_metrics_history': dev_metrics_history
-                }, os.path.join(checkpoint_dir, 'training_state.pt'))
-                logger.info(f'Saved checkpoint to {checkpoint_dir}')
+                    'global_step': global_step
+                })
+                
+                # 保存最佳模型
+                if eval_loss < best_eval_loss:
+                    best_eval_loss = eval_loss
+                    best_model_path = os.path.join(output_dir, 'best_model')
+                    os.makedirs(best_model_path, exist_ok=True)
+                    model.save_pretrained(best_model_path)
+                    tokenizer.save_pretrained(best_model_path)
         
-        avg_train_loss = total_loss / len(train_loader)
-        train_losses.append(avg_train_loss)
-        
-        # Evaluation
-        metrics = evaluate(model, dev_loader, preprocessor, device)
-        dev_metrics_history.append(metrics)
-        
-        logger.info(f'Epoch {epoch+1}:')
-        logger.info(f'Average training loss: {avg_train_loss:.4f}')
-        for metric_name, value in metrics.items():
-            logger.info(f'{metric_name}: {value:.4f}')
-            
-        # 记录评估指标到wandb
-        wandb.log({
-            'eval/loss': avg_train_loss,
-            'eval/epoch': epoch + 1,
-            **{f'eval/{k}': v for k, v in metrics.items()}
-        })
-        
-        # 保存每个epoch结束后的模型
-        epoch_dir = os.path.join(output_dir, f'epoch-{epoch+1}')
-        os.makedirs(epoch_dir, exist_ok=True)
-        model.save_pretrained(epoch_dir)
-        torch.save({
-            'epoch': epoch + 1,
-            'global_step': global_step,
-            'optimizer_state_dict': optimizer.state_dict(),
-            'scheduler_state_dict': scheduler.state_dict(),
-            'train_losses': train_losses,
-            'dev_metrics_history': dev_metrics_history
-        }, os.path.join(epoch_dir, 'training_state.pt'))
-        logger.info(f'Saved epoch checkpoint to {epoch_dir}')
+        # 打印每个epoch的平均损失
+        avg_loss = epoch_loss / len(train_loader)
+        logger.info(f'Epoch {epoch+1}/{num_epochs}, Average Loss: {avg_loss:.4f}')
     
-    # Plot training curve
-    plot_training_curve(train_losses, dev_metrics_history)
-    
-    return train_losses, dev_metrics_history
+    progress_bar.close()
+    return global_step
 
-def evaluate(model, dev_loader, preprocessor, device):
+def evaluate(model, dev_loader, tokenizer, device):
     model.eval()
-    metrics_calculator = MetricsCalculator()
+    total_loss = 0
     
     with torch.no_grad():
-        for batch in tqdm(dev_loader, desc='Evaluating'):
-            # 预处理数据
-            inputs = preprocessor(batch)
-            inputs = {k: v.to(device) if isinstance(v, torch.Tensor) else v 
-                     for k, v in inputs.items()}
+        for batch in tqdm(dev_loader, desc="Evaluating"):
+            input_ids = batch['input_ids'].to(device)
+            attention_mask = batch['attention_mask'].to(device)
+            labels = batch['labels'].to(device)
             
-            # 生成答案
-            outputs = model.generate(**inputs)
-            predictions = preprocessor.decode(outputs)
-            references = batch['answer']
+            outputs = model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                labels=labels
+            )
             
-            metrics_calculator.update(references, predictions)
+            loss = outputs.loss
+            total_loss += loss.item()
     
-    return metrics_calculator.get_metrics()
+    avg_loss = total_loss / len(dev_loader)
+    logger.info(f'Evaluation Loss: {avg_loss:.4f}')
+    return avg_loss
 
 def main():
-    # 解析命令行参数
     args = parse_args()
     
     # 初始化wandb
-    wandb.init(
-        project=args.wandb_project,
-        name=args.wandb_name,
-        entity=args.wandb_entity,
-        config=vars(args)
-    )
+    wandb.init(project=args.wandb_project)
+    wandb.config.update(args)
     
-    # Set device
+    # 设置设备
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     logger.info(f'Using device: {device}')
     
-    # 创建预处理器
-    preprocessor = TextGenerationT5Preprocessor(model_dir=args.model_id)
+    # 加载tokenizer和model
+    tokenizer = AutoTokenizer.from_pretrained(args.model_id)
+    model = AutoModelForSeq2SeqLM.from_pretrained(args.model_id)
+    model = model.to(device)
     
-    # Load model
-    if args.resume_from:
-        logger.info(f'Loading model from checkpoint: {args.resume_from}')
-        model = Model.from_pretrained(args.resume_from, task=Tasks.text_generation)
-        # 加载训练状态
-        training_state = torch.load(os.path.join(args.resume_from, 'training_state.pt'))
-        start_epoch = training_state['epoch']
-        logger.info(f'Resuming from epoch {start_epoch}')
-    else:
-        model = Model.from_pretrained(args.model_id, task=Tasks.text_generation)
-        start_epoch = 0
-    
-    model.to(device)
-    
-    # Create dataloaders
+    # 创建数据加载器
     train_loader, dev_loader = create_dataloaders(
         args.train_path, 
-        args.dev_path, 
-        preprocessor,
+        args.dev_path,
+        tokenizer,
+        tokenizer,
         batch_size=args.batch_size,
         max_length=args.max_length,
         max_samples=args.max_samples
     )
     
-    # Train the model
-    train(
+    # 如果指定了检查点，从检查点恢复
+    start_epoch = 0
+    if args.resume_from:
+        checkpoint = torch.load(os.path.join(args.resume_from, 'pytorch_model.bin'))
+        model.load_state_dict(checkpoint)
+        # 从检查点路径中提取epoch数
+        try:
+            start_epoch = int(args.resume_from.split('-')[-1])
+        except:
+            start_epoch = 0
+    
+    # 创建输出目录
+    os.makedirs(args.output_dir, exist_ok=True)
+    
+    # 训练模型
+    global_step = train(
         model=model,
         train_loader=train_loader,
         dev_loader=dev_loader,
-        preprocessor=preprocessor,
+        tokenizer=tokenizer,
         device=device,
         num_epochs=args.num_epochs,
         learning_rate=args.learning_rate,
@@ -264,12 +227,12 @@ def main():
         start_epoch=start_epoch
     )
     
-    # Save the final model
-    os.makedirs(args.output_dir, exist_ok=True)
-    model.save_pretrained(args.output_dir)
-    logger.info(f"Model saved to {args.output_dir}")
+    # 保存最终模型
+    final_model_path = os.path.join(args.output_dir, f'final-model')
+    os.makedirs(final_model_path, exist_ok=True)
+    model.save_pretrained(final_model_path)
+    tokenizer.save_pretrained(final_model_path)
     
-    # 结束wandb运行
     wandb.finish()
 
 if __name__ == "__main__":

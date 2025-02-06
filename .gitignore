@@ -39,6 +39,8 @@ qa_model/
 data/
 *.log
 training_curves.png
+pretrained_models/
+wandb/
 
 # Jupyter Notebook
 .ipynb_checkpoints
